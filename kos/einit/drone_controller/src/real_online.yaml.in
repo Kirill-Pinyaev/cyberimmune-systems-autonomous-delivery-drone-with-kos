@@ -1,0 +1,94 @@
+entities:
+
+- name: drone_controller.AutopilotConnector
+  connections:
+  - target: drone_controller.PeripheryController
+    id: periphery_controller_connection
+  - target: drone_controller.Logger
+    id: logger_connection
+  - target: drone_controller.ServerConnector
+    id: server_connector_connection
+@INIT_AutopilotConnector_ENTITY_CONNECTIONS@
+
+- name: drone_controller.CredentialManager
+  env:
+    VFS_FILESYSTEM_BACKEND: client:kl.VfsSdCardFs
+  connections:
+  - target: kl.VfsSdCardFs
+    id: kl.VfsSdCardFs
+  - target: drone_controller.ServerConnector
+    id: server_connector_connection
+  - target: drone_controller.Logger
+    id: logger_connection
+@INIT_CredentialManager_ENTITY_CONNECTIONS@
+
+- name: drone_controller.FlightController
+  connections:
+  - target: drone_controller.AutopilotConnector
+    id: autopilot_connector_connection
+  - target: drone_controller.CredentialManager
+    id: credential_manager_connection
+  - target: drone_controller.NavigationSystem
+    id: navigation_system_connection
+  - target: drone_controller.PeripheryController
+    id: periphery_controller_connection
+  - target: drone_controller.ServerConnector
+    id: server_connector_connection
+  - target: drone_controller.Logger
+    id: logger_connection
+@INIT_FlightController_ENTITY_CONNECTIONS@
+
+- name: drone_controller.NavigationSystem
+  connections:
+  - target: drone_controller.PeripheryController
+    id: periphery_controller_connection
+  - target: drone_controller.ServerConnector
+    id: server_connector_connection
+  - target: drone_controller.Logger
+    id: logger_connection
+@INIT_NavigationSystem_ENTITY_CONNECTIONS@
+
+- name: drone_controller.PeripheryController
+  connections:
+  - target: drone_controller.Logger
+    id: logger_connection
+  - target: drone_controller.ServerConnector
+    id: server_connector_connection
+@INIT_PeripheryController_ENTITY_CONNECTIONS@
+
+- name: drone_controller.ServerConnector
+  env:
+    VFS_FILESYSTEM_BACKEND: client:kl.VfsNet
+    VFS_NETWORK_BACKEND: client:kl.VfsNet
+  args:
+    - -sV4
+  connections:
+  - target: kl.VfsNet
+    id: kl.VfsNet
+  - target: drone_controller.Logger
+    id: logger_connection
+@INIT_ServerConnector_ENTITY_CONNECTIONS@
+
+- name: drone_controller.Logger
+  env:
+    VFS_FILESYSTEM_BACKEND: client:kl.VfsSdCardFs
+  connections:
+  - target: kl.VfsSdCardFs
+    id: kl.VfsSdCardFs
+  - target: drone_controller.ServerConnector
+    id: server_connector_connection
+@INIT_Logger_ENTITY_CONNECTIONS@
+
+- name: kl.Ntpd
+  path: ntpd
+  env:
+    VFS_FILESYSTEM_BACKEND: client:kl.VfsSdCardFs
+    VFS_NETWORK_BACKEND: client:kl.VfsNet
+  connections:
+  - target: kl.VfsNet
+    id: kl.VfsNet
+  - target: kl.VfsSdCardFs
+    id: kl.VfsSdCardFs
+@INIT_ntpd_ENTITY_CONNECTIONS+@
+
+@INIT_EXTERNAL_ENTITIES@

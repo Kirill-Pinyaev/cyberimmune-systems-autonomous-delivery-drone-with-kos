@@ -1,0 +1,113 @@
+@startuml
+package "Системные программы" {
+[kl.drivers.Bcm2711MboxArmToVc]
+[kl.drivers.BSP]
+[kl.drivers.DNetBrcmfmacSrv]
+[kl.drivers.DNetSrv]
+[kl.drivers.GPIO]
+[kl.drivers.I2C]
+[kl.drivers.SDCard]
+[kl.drivers.UART]
+[kl.EntropyEntity]
+[kl.Ntpd]
+[kl.rump.Dhcpcd]
+[kl.VfsNet]
+[kl.VfsSdCardFs]
+[wpa.WpaSupplicant]
+}
+
+package "Приложения" {
+[AutopilotConnector]
+[CredentialManager]
+[FlightController]
+[NavigationSystem]
+[PeripheryController]
+[ServerConnector]
+[Logger]
+}
+note as AC
+ Связь с полётным
+ контроллером
+end note
+
+[AutopilotConnector] .. AC
+
+note as CM
+ Контроль аутентичности
+ полётного задания
+end note
+
+[CredentialManager] .. CM
+
+note as FC
+  Контроль
+  выполнения
+  полётного задания
+  (основной для соревнований)
+end note
+
+[FlightController] .. FC
+
+note as NS
+ Контроль положения
+end note
+
+[NavigationSystem] .. NS
+
+note as PC
+ Контроль приводов
+end note
+
+[PeripheryController] .. PC
+
+note as SC
+ Связь с ОрВД
+end note
+
+[ServerConnector] .. SC
+
+@startuml
+[AutopilotConnector] -- [PeripheryController]
+[AutopilotConnector] -- [Logger]
+[AutopilotConnector] --- [kl.drivers.BSP]
+[AutopilotConnector] --- [kl.drivers.UART]
+[CredentialManager] --- [kl.VfsSdCardFs]
+[CredentialManager] -- [ServerConnector]
+[CredentialManager] -- [Logger]
+[FlightController] -- [AutopilotConnector]
+[FlightController] -- [CredentialManager]
+[FlightController] -- [NavigationSystem]
+[FlightController] -- [PeripheryController]
+[FlightController] -- [ServerConnector]
+[FlightController] -- [Logger]
+[NavigationSystem] -- [PeripheryController]
+[NavigationSystem] -- [ServerConnector]
+[NavigationSystem] -- [Logger]
+[NavigationSystem] --- [kl.drivers.BSP]
+[NavigationSystem] --- [kl.drivers.UART]
+[NavigationSystem] --- [kl.drivers.I2C]
+[PeripheryController] -- [Logger]
+[PeripheryController] --- [kl.drivers.BSP]
+[PeripheryController] --- [kl.drivers.GPIO]
+[ServerConnector] --- [kl.VfsNet]
+[ServerConnector] -- [Logger]
+[ServerConnector] --- [wpa.WpaSupplicant]
+[Logger] --- [kl.VfsSdCardFs]
+[kl.Ntpd] -- [kl.VfsNet]
+[kl.Ntpd] -- [kl.VfsSdCardFs]
+[kl.drivers.BSP] -- [kl.drivers.Bcm2711MboxArmToVc]
+[kl.drivers.UART] -- [kl.drivers.BSP]
+[wpa.WpaSupplicant] -- [kl.VfsNet]
+[kl.VfsSdCardFs] -- [kl.drivers.SDCard]
+[kl.VfsSdCardFs] -- [kl.EntropyEntity]
+[kl.VfsNet] -- [kl.EntropyEntity]
+[kl.VfsNet] -- [kl.drivers.DNetBrcmfmacSrv]
+[kl.VfsNet] -- [kl.drivers.DNetSrv]
+[kl.rump.Dhcpcd] -- [kl.VfsNet]
+[kl.drivers.Bcm2711MboxArmToVc]
+[kl.drivers.SDCard] -- [kl.drivers.BSP]
+[kl.drivers.DNetBrcmfmacSrv]
+[kl.drivers.DNetBrcmfmacSrv] -- [kl.drivers.BSP]
+[kl.drivers.DNetSrv] -- [kl.drivers.Bcm2711MboxArmToVc]
+
+@enduml

@@ -1,0 +1,24 @@
+#
+# /etc/ntp.conf
+#
+# Sample NTP configuration file.
+#
+# For additional information see:
+# - https://wiki.archlinux.org/index.php/Network_Time_Protocol_daemon
+# - http://support.ntp.org/bin/view/Support/GettingStarted
+# - the ntp.conf man page
+
+# Set big dispersion value
+tinker panic 0 stepout 1 dispersion 50000000.0
+
+# By default, exchange time with everybody, but don't allow configuration.
+restrict -4 default notrap nomodify nopeer noquery
+restrict -6 default notrap nomodify nopeer noquery
+
+# Local users may interrogate the ntp server more closely.
+restrict 127.0.0.1
+restrict ::1
+
+# Location of drift file
+driftfile /var/ntp.drift
+
