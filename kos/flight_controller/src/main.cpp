@@ -28,25 +28,8 @@
 
 char boardId[32] = {0};
 uint32_t sessionDelay;
-std::thread sessionThread, updateThread, coordsThread;
+std::thread sessionThread, updateThread;
 /** \endcond */
-
-void logCoordinates() {
-    char logBuffer[256] = {0};
-    int32_t latRaw = 0, lonRaw = 0, altRaw = 0;
-    while (true) {
-        if (getCoords(latRaw, lonRaw, altRaw)) {
-            double latitude = static_cast<double>(latRaw) / 1e7;
-            double longitude = static_cast<double>(lonRaw) / 1e7;
-            double altitude = static_cast<double>(altRaw) / 100.0;
-            snprintf(logBuffer, 256, "Current position — lat: %.7f°, lon: %.7f°, alt: %.2f m", latitude, longitude, altitude);
-            logEntry(logBuffer, ENTITY_NAME, LogLevel::LOG_INFO);
-        } else {
-            logEntry("Failed to obtain coordinates from Navigation System", ENTITY_NAME, LogLevel::LOG_WARNING);
-        }
-        sleep(1);
-    }
-}
 
 /**
  * \~English Procedure that checks connection to the ATM server.
@@ -74,7 +57,7 @@ void pingSession() {
         }
         else {
             //No response from the server
-            //If server does not respond for 3 more seconds, flight must be paused until the response is received 
+            //If server does not respond for 3 more seconds, flight must be paused until the response is received
         }
 
         sleep(sessionDelay);
@@ -93,7 +76,7 @@ void serverUpdateCheck() {
             if (strcmp(message, "")) {
                 uint8_t authenticity = 0;
                 if (checkSignature(message, authenticity) || !authenticity) {
-                    if (strstr(message, "$Flight -1$")) {
+                    if (strstr(message, "$Flight -1#")) {
                         logEntry("Emergency stop request is received. Disabling motors", ENTITY_NAME, LogLevel::LOG_INFO);
                         if (!enableBuzzer())
                             logEntry("Failed to enable buzzer", ENTITY_NAME, LogLevel::LOG_WARNING);
@@ -103,8 +86,8 @@ void serverUpdateCheck() {
                         }
                     }
                     //The message has two other possible options:
-                    //  "$Flight 1$" that requires to pause flight and remain landed
-                    //  "$Flight 0$" that requires to resume flight and keep flying
+                    //  "$Flight 1#" that requires to pause flight and remain landed
+                    //  "$Flight 0#" that requires to resume flight and keep flying
                     //Implementation is required to be done
                 }
                 else
@@ -157,7 +140,7 @@ int askForMissionApproval(char* mission, int& result) {
         return 0;
     }
 
-    snprintf(message, 512, "mission=%s&sig=0x%s", mission, signature);
+    snprintf(message, messageSize, "mission=%s&sig=0x%s", mission, signature);
     if (!publishMessage("api/nmission/request", message)) {
         logEntry("Failed to publish new mission through Server Connector", ENTITY_NAME, LogLevel::LOG_WARNING);
         free(message);
@@ -341,7 +324,6 @@ int main(void) {
             //Start ORVD threads
             sessionThread = std::thread(pingSession);
             updateThread = std::thread(serverUpdateCheck);
-            coordsThread = std::thread(logCoordinates);
             break;
         }
         else if (strstr(subscriptionBuffer, "$Arm 1$")) {
