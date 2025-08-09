@@ -39,6 +39,8 @@ void pingSession() {
     sleep(sessionDelay);
 
     char pingMessage[1024] = {0};
+    uint32_t noResponseStartTime = 0;
+    bool connectionLost = false;
     while (true) {
         if (!receiveSubscription("ping/", pingMessage, 1024)) {
             logEntry("Failed to receive ping through Server Connector", ENTITY_NAME, LogLevel::LOG_WARNING);
@@ -58,7 +60,32 @@ void pingSession() {
         else {
             //No response from the server
             //If server does not respond for 3 more seconds, flight must be paused until the response is received
+            if (!connectionLost) {
+                noResponseStartTime = kos::timer::millis();
+                connectionLost = true;
+            }
+            
+            if (connectionLost && (kos::timer::millis() - noResponseStartTime) >= 3000) {
+                logEntry("No response from server for 3 seconds. Pausing flight and waiting for connection restore", ENTITY_NAME, LogLevel::LOG_ERROR);
+                
+                if (!pauseFlight()) {
+                    logEntry("Failed to pause flight through Autopilot Connector", ENTITY_NAME, LogLevel::LOG_WARNING);
+                }
+                
+                while (!receiveSubscription("ping/", pingMessage, 1024) || !strcmp(pingMessage, "")) {
+                    sleep(1000);// какое время ставить?
+                }
+                
+                logEntry("Connection with server restored. Resuming flight", ENTITY_NAME, LogLevel::LOG_INFO);
+                
+                if (!resumeFlight()) {
+                    logEntry("Failed to resume flight through Autopilot Connector", ENTITY_NAME, LogLevel::LOG_WARNING);
+                }
+                
+                connectionLost = false;
+            }
         }
+        
 
         sleep(sessionDelay);
     }
