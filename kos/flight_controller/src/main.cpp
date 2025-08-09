@@ -57,43 +57,27 @@ void logCoordinates()
     }
 }
 
-
-/**
- * \~English Procedure that checks connection to the ATM server.
- * \~Russian Процедура, проверяющая наличие соединения с сервером ОРВД.
- */
-void pingSession()
+void doSetNormalSpeed()
 {
-    sleep(sessionDelay);
-
-    char pingMessage[1024] = {0};
-    while (true)
-    {
-     
-
-    while (true)
-    {
-        getEstimatedSpeed(currentSpeed);
-        snprintf(logBuffer, 256, "Current speed %.7f", currentSpeed);
-        logEntry(logBuffer, ENTITY_NAME, LogLevel::LOG_INFO);
-        if (currentSpeed > 0.6 || (currentSpeed > 0.1 && currentSpeed <= 0.3))
-        {
-            snprintf(logBuffer, 256, "Changed speed! Current speed %.4f", currentSpeed);
-            logEntry(logBuffer, ENTITY_NAME, LogLevel::LOG_INFO);
-            // setKillSwitch(0);
-            changeSpeed(50);
-            // setKillSwitch(1);
-        }
-        sleep(1);
-    }
-}
-
-void doSetNormalAlt()
-{
-    float currentAlt;
+    float currentSpeed;
     char logBuffer[256] = {0};
 
-    
+    while (true)
+    {
+        if (getEstimatedSpeed(currentSpeed)) {
+            snprintf(logBuffer, 256, "Current speed %.7f", currentSpeed);
+            logEntry(logBuffer, ENTITY_NAME, LogLevel::LOG_INFO);
+            if (currentSpeed > 0.6 || (currentSpeed > 0.1 && currentSpeed <= 0.3))
+            {
+                snprintf(logBuffer, 256, "Changed speed! Current speed %.4f", currentSpeed);
+                logEntry(logBuffer, ENTITY_NAME, LogLevel::LOG_INFO);
+                // setKillSwitch(0);
+                changeSpeed(50);
+                // setKillSwitch(1);
+            }
+            sleep(1);
+        }
+    }
 }
 
 /**
