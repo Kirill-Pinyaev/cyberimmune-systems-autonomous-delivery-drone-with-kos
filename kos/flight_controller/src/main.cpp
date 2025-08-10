@@ -269,9 +269,13 @@ int main(void) {
     }
 
     if (loadMission(subscriptionBuffer)) {
-        logEntry("Successfully received mission from the server", ENTITY_NAME, LogLevel::LOG_INFO);
-        printMission();
-    }
+    logEntry("Successfully received mission from the server", ENTITY_NAME, LogLevel::LOG_INFO);
+    printMission();
+
+    // Инициализация защиты груза
+    initCargoProtection();
+    setCargoLock(0); // По умолчанию питание на сервопривод выключено
+}
 
     //The drone is ready to arm
     logEntry("Ready to arm", ENTITY_NAME, LogLevel::LOG_INFO);
