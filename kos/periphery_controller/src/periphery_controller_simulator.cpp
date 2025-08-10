@@ -19,21 +19,12 @@
 
 #include <stdio.h>
 #include <math.h>
-#include <time.h> // для time()
 
 /** \cond */
 #define SIM_PERIPHERY_MESSAGE_HEAD_SIZE 4
 #define RFID_TAG_NUM 10
 
 static const uint8_t SimPeripheryMessageHead[SIM_PERIPHERY_MESSAGE_HEAD_SIZE] = { 0x06, 0x66, 0xbe, 0xa7 };
-// --- Cargo drop authorization state ---
-static bool cargoDropAuthorized = false;          // true, если разрешение выставлено миссией/оператором
-static int64_t cargoAuthorizationExpiry = 0;     // unix timestamp (seconds) когда разрешение истекает
-static int32_t cargoAuthLat = 0;                 // разрешённые координаты (формат как rfidLats)
-static int32_t cargoAuthLng = 0;
-static float cargoAuthRadiusSquared = 0.0f;      // радиус в той же шкале, что и scanSquaredDistance (скваж. расстояние)
-static const int DEFAULT_CARGO_AUTH_TIMEOUT = 30; // сек. по умолчанию — окно, в котором можно выполнить сброс
-/** \endcond */
 /** \endcond */
 
 /**
@@ -166,81 +157,6 @@ bool isKillSwitchEnabled() {
     return killSwitchEnabled;
 }
 
-
-// Установить разрешение на сброс груза (вызывать миссией/оператором перед подлётом к точке)
-void authorizeCargoDrop(int32_t lat, int32_t lng, float radiusMeters, int timeoutSeconds = DEFAULT_CARGO_AUTH_TIMEOUT) {
-    // Конвертируем radiusMeters в ту же метрику, где latScale/lngScale уже учитывают cos(lat)
-    // У нас в коде используются предскейлы latScale/lngScale на 1e-7 угловых единиц -> оставим простой подход:
-    // Преобразуем метр в *скейлованные* градусы приблизительно: 1 deg ~ 111 km -> meters/111000 -> degrees
-    // Но поскольку в проекте используется latScale/lngScale (фактор в readRfid), удобнее:
-    // Предположим входные radiusMeters задаются в метрах; переводим в "scaled units" через latScale/lngScale:
-    // approximate degrees = meters / 111000.0
-    float degreesRadius = radiusMeters / 111000.0f;
-    // переводим degree -> "scaled" как в readRfid (они умножают (rfid - lat) * latScale)
-    // чтобы получить порог сравнения (latDif^2 + lngDif^2 < threshold), нам нужно:
-    // threshold = (degreesRadius / latScale_for_coords)^2 roughly. Но latScale already ~0.01113 which is ~degrees->meters ? 
-    // Для консистентности: будем хранить порог в тех же единицах, что и scanSquaredDistance:
-    // При проверке мы делаем latDif = (rfidLat - currLat) * latScale; И сравниваем latDif^2 + ...
-    // чтобы radius в метрах перевести в тот же порог: radiusDegrees = degreesRadius; latDifThreshold = radiusDegrees * (1.0f/1.0f) ??? 
-    // (упрощаем: переводим degreesRadius в "dif" с помощью константы 1.0e-7, т.к. rfidLat хранится как lat*1e7)
-    // Конкретно: if currLat and rfidLat are in 1e-7 degrees -> diffRaw = (rfid - curr)*1e-7 (deg)
-    // latDif = diffRaw * (M_PI/180)?? Но в readRfid they used latScale directly. Чтобы быть консистентным, можно
-    // вычислить threshold numerically at runtime using current coords (use conversion used in initPeripheryController).
-    // Для простоты: сохраним radiusMeters и при проверке будем конвертировать корректно.
-    // Здесь сохраним параметры:
-    cargoDropAuthorized = true;
-    cargoAuthLat = lat;
-    cargoAuthLng = lng;
-    time_t now = time(nullptr);
-    cargoAuthorizationExpiry = (int64_t)now + timeoutSeconds;
-    // Сохранить radiusMeters в cargoAuthRadiusSquared как квадрат радиуса в метрах (придётся конвертировать при проверке)
-    cargoAuthRadiusSquared = radiusMeters * radiusMeters;
-}
-
-// Отменить разрешение заранее
-void revokeCargoAuthorization() {
-    cargoDropAuthorized = false;
-    cargoAuthorizationExpiry = 0;
-    cargoAuthLat = cargoAuthLng = 0;
-    cargoAuthRadiusSquared = 0.0f;
-}
-
-// Внутренняя проверка: разрешён ли сейчас сброс по координатам и таймауту
-static bool isAtAuthorizedDropPointAndAuthorized(int32_t currLat, int32_t currLng, int currAlt) {
-    if (!cargoDropAuthorized) return false;
-    time_t now = time(nullptr);
-    if (now > cargoAuthorizationExpiry) {
-        // истёк таймаут
-        revokeCargoAuthorization();
-        return false;
-    }
-
-    // Конвертация: вычислим расстояние в метрах между current и auth через приближение Haversine упрощённо.
-    // Простейший способ — использовать lat/lng в 1e-7 degrees -> перевести в degrees -> radians -> расчёт Haversine.
-    auto deg_from_int = [](int32_t v)->double { return v * 1e-7; };
-
-    double lat1 = deg_from_int(currLat) * M_PI / 180.0;
-    double lon1 = deg_from_int(currLng) * M_PI / 180.0;
-    double lat2 = deg_from_int(cargoAuthLat) * M_PI / 180.0;
-    double lon2 = deg_from_int(cargoAuthLng) * M_PI / 180.0;
-
-    double dlat = lat2 - lat1;
-    double dlon = lon2 - lon1;
-    double a = sin(dlat/2)*sin(dlat/2) + cos(lat1)*cos(lat2)*sin(dlon/2)*sin(dlon/2);
-    double c = 2 * atan2(sqrt(a), sqrt(1-a));
-    double earthRadius = 6371000.0; // meters
-    double distanceMeters = earthRadius * c;
-
-    if (distanceMeters * distanceMeters <= (double)cargoAuthRadiusSquared) {
-        // Дополнительные проверки: можно проверить высоту/скорость здесь (alt/velocity) — в текущем api есть currAlt.
-        // Например, проверить, что высота не слишком большая/маленькая; пропустим (можно добавить по необходимости).
-        return true;
-    }
-
-    return false;
-}
-
-
 int setBuzzer(bool enable) {
     char logBuffer[256] = {0};
     snprintf(logBuffer, 256, "Buzzer is %s", enable ? "enabled" : "disabled");
@@ -280,40 +196,10 @@ int setKillSwitch(bool enable) {
 }
 
 int setCargoLock(bool enable) {
-    // Если пришла команда на "запрет" — всегда разрешаем запрет (оно безопасно).
-    if (!enable) {
-        SimPeripheryMessage message = SimPeripheryMessage(SimPeripheryCommand::CargoForbid);
-        write(peripherySocket, &message, sizeof(SimPeripheryMessage));
-        revokeCargoAuthorization(); // безопасность: после запрета отменим разрешения
-        if (!publishMessage("api/events", "type=cargo_lock&event=Cargo lock is disabled"))
-            logEntry("Failed to publish event message", ENTITY_NAME, LogLevel::LOG_WARNING);
-        return 1;
-    }
-
-    // enable == true: хотим включить питание мотора сброса — проверяем авторизацию и позицию
-    int32_t currLat, currLng, currAlt;
-    getCoords(currLat, currLng, currAlt);
-
-    if (isAtAuthorizedDropPointAndAuthorized(currLat, currLng, currAlt)) {
-        // Всё ок — разрешаем
-        SimPeripheryMessage message = SimPeripheryMessage(SimPeripheryCommand::CargoPermit);
-        write(peripherySocket, &message, sizeof(SimPeripheryMessage));
-        // после успешного разрешения — логируем и сразу отзываем авторизацию (предотвращаем повторный случайный сброс)
-        revokeCargoAuthorization();
-        if (!publishMessage("api/events", "type=cargo_lock&event=Cargo lock is enabled"))
-            logEntry("Failed to publish event message", ENTITY_NAME, LogLevel::LOG_WARNING);
-    } else {
-        // Не разрешено: отправляем forbid (отменяем команду), логируем и публикуем предупреждение
-        SimPeripheryMessage message = SimPeripheryMessage(SimPeripheryCommand::CargoForbid);
-        write(peripherySocket, &message, sizeof(SimPeripheryMessage));
-
-        char logBuffer[256] = {0};
-        snprintf(logBuffer, sizeof(logBuffer), "CargoPermit denied: not within authorized drop point or authorization expired (lat=%d lng=%d)", currLat, currLng);
-        logEntry(logBuffer, ENTITY_NAME, LogLevel::LOG_WARNING);
-
-        if (!publishMessage("api/events", "type=cargo_lock&event=Cargo drop attempt denied"))
-            logEntry("Failed to publish event message", ENTITY_NAME, LogLevel::LOG_WARNING);
-    }
+    SimPeripheryMessage message = SimPeripheryMessage(enable ? SimPeripheryCommand::CargoPermit : SimPeripheryCommand::CargoForbid);
+    write(peripherySocket, &message, sizeof(SimPeripheryMessage));
+    if (!publishMessage("api/events", enable ? "type=cargo_lock&event=Cargo lock is enabled" : "type=kill_switch&event=Cargo lock is disabled"))
+        logEntry("Failed to publish event message", ENTITY_NAME, LogLevel::LOG_WARNING);
 
     return 1;
 }
