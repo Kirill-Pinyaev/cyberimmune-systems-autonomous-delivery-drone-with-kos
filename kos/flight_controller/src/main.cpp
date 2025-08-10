@@ -19,18 +19,363 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <vector>
 #include <thread>
+#include <atomic>
+#include <cmath>
+#include <chrono>
+
 
 /** \cond */
 #define RETRY_DELAY_SEC 1
 #define RETRY_REQUEST_DELAY_SEC 5
 #define FLY_ACCEPT_PERIOD_US 500000
 
+constexpr double REACH_RADIUS_M     = 5.0;   // считаем точку достигнутой
+constexpr double BASE_MARGIN_M      = 2.0;   // минимальный зазор для "ближайшая не та"
+constexpr double REL_MARGIN_K       = 0.20;  // доля от dcur для динамического порога
+constexpr double TREND_STEP_MIN_M   = 0.2;   // минимальный шаг роста dcur, считаем "удалением"
+constexpr int    TREND_CONFIRM_N    = 6;     // подряд тиков "удаляемся"
+constexpr int    HIJACK_CONFIRM_N   = 2;     // подряд тиков "ближайшая другая" для срабатывания
+constexpr int    ESCALATE_AFTER_K   = 3;     // сколько коррекций подряд до эскалации
+constexpr double STARTUP_MOVE_ARM_M         = 0; // сколько пройти по земле, чтобы "вооружить" детектор
+constexpr int    NO_MISSION_COOLDOWN_MS     = 3000; // кулдаун после неудачного changeWaypoint()
+constexpr double ALT_ARM_MIN_M        = 15.0;  // начнём анализ, когда выше этой высоты
+//constexpr int    LOCK_WINDOW_TICKS    = 10;    // ≈ 3 с при периоде 300 мс
+constexpr double LOCK_MIN_GAIN_M      = 3.0;   // минимум убывания дистанции, чтобы считать "идём на этот WP"
+constexpr int    GUARD_CONFIRM_TICKS  = 3;    
+constexpr double NEAR_LOCK_DIST_M      = 30.0;   // прямой лок по близости
+constexpr double LOCK_STEP_MIN_M       = 0.2;    // минимальный «шаг» убыли между тиками
+constexpr int    LOCK_DECR_TICKS       = 6;      // минимум тиков с убывшей дистанцией
+constexpr int    LOCK_WINDOW_TICKS     = 12;     // ~3.6 c при 300 мс
+constexpr double LOCK_MIN_GAIN_ABS_M   = 1.0;    // порог абсолютной убыли за окно
+constexpr double LOCK_MIN_GAIN_REL_K   = 0.08;   // относительный порог: 8% от d0
+constexpr int    LOCK_MAX_WINDOWS      = 3;      // столько окон подряд терпим «inconclusive»
+constexpr int    LOCK_MAX_AHEAD        = 6;      // при fallback смотрим первые N точек
+constexpr double LOCK_FALLBACK_DIST_M  = 80.0;   // и не дальше этого порога
+
 char boardId[32] = {0};
 uint32_t sessionDelay;
 std::thread sessionThread, updateThread;
 /** \endcond */
+static std::atomic<bool> g_stopRouteGuard{false};
 
+enum class RGMode { WAIT, LOCK, GUARD };
+static RGMode g_mode = RGMode::WAIT;
+
+struct LockBuf {
+    std::vector<double> d0;      // дистанции в начале окна
+    std::vector<double> prev;    // дистанции на прошлом тике
+    std::vector<int>    decr;    // сколько раз уменьшилась за окно
+    int ticks = 0;
+    int windows = 0;
+} g_lock;
+struct RGState {
+    bool   armed = false;           // детектор готов к работе
+    double movedAccum = 0.0;        // накопленное горизонтальное перемещение, м
+    int32_t lastLat = 0, lastLon = 0;
+    bool   haveLast = false;
+    int64_t cooldownUntilMs = 0;    // монотонное время (мс), до которого сторож спит
+};
+static RGState g_rg;
+static int64_t monoMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+static double toRad(int32_t vdeg1e7) {
+    return (static_cast<double>(vdeg1e7) / 1e7) * M_PI / 180.0;
+}
+static double haversineMeters(int32_t lat1, int32_t lon1, int32_t lat2, int32_t lon2) {
+    constexpr double R = 6371000.0; // Earth radius [m]
+    const double dLat = toRad(lat2 - lat1);
+    const double dLon = toRad(lon2 - lon1);
+    const double a = std::sin(dLat/2)*std::sin(dLat/2) +
+                     std::cos(toRad(lat1))*std::cos(toRad(lat2))*
+                     std::sin(dLon/2)*std::sin(dLon/2);
+    const double c = 2 * std::atan2(std::sqrt(a), std::sqrt(1-a));
+    return R * c;
+}
+static size_t pickLockIndexByGain(const std::vector<double>& d0, const std::vector<double>& d1, double minGain) {
+    size_t best = SIZE_MAX; double bestGain = 0.0;
+    for (size_t i = 0; i < d0.size() && i < d1.size(); ++i) {
+        double gain = d0[i] - d1[i]; // насколько дистанция уменьшилась
+        if (gain > bestGain && gain >= minGain) { bestGain = gain; best = i; }
+    }
+    return best;
+}
+static size_t pickByGain(const std::vector<double>& d0,
+                         const std::vector<double>& d1,
+                         double absMin, double relK)
+{
+    size_t best = SIZE_MAX; double bestGain = 0.0;
+    for (size_t i=0;i<d0.size() && i<d1.size();++i){
+        double gain = d0[i] - d1[i];
+        double need = std::max(absMin, relK * d0[i]);
+        if (gain >= need && gain > bestGain) { bestGain = gain; best = i; }
+    }
+    return best;
+}
+
+static void routeGuardThreadFunc() {
+    logEntry((char*)"RouteGuard: starting route monitoring", ENTITY_NAME, LogLevel::LOG_INFO);
+
+    // snapshot original mission and build raw bytes
+    int numCmds = 0;
+    MissionCommand* cmds = getMissionCommands(numCmds);
+    if (!cmds || numCmds <= 0) {
+        logEntry((char*)"RouteGuard: no mission loaded", ENTITY_NAME, LogLevel::LOG_WARNING);
+        return;
+    }
+
+    const uint32_t bytesSize = getMissionBytesSize(cmds, (uint8_t)numCmds);
+    std::vector<uint8_t> missionBytes(bytesSize);
+    if (!missionToBytes(cmds, (uint8_t)numCmds, missionBytes.data())) {
+        logEntry((char*)"RouteGuard: missionToBytes failed", ENTITY_NAME, LogLevel::LOG_WARNING);
+        return;
+    }
+
+    // collect target waypoints
+    struct WP { int32_t lat, lon, alt; };
+    std::vector<WP> targets;
+    targets.reserve(numCmds);
+
+    logEntry((char*)"RouteGuard: parsing mission waypoints:", ENTITY_NAME, LogLevel::LOG_INFO);
+    for (int i=0;i<numCmds;i++) {
+        if (cmds[i].type == CommandType::WAYPOINT) {
+            targets.push_back({cmds[i].content.waypoint.latitude,
+                               cmds[i].content.waypoint.longitude,
+                               cmds[i].content.waypoint.altitude});
+            char buf[128];
+            snprintf(buf, sizeof(buf), "  WP #%d: lat=%d lon=%d alt=%d",
+                     (int)targets.size()-1,
+                     cmds[i].content.waypoint.latitude,
+                     cmds[i].content.waypoint.longitude,
+                     cmds[i].content.waypoint.altitude);
+            logEntry(buf, ENTITY_NAME, LogLevel::LOG_INFO);
+        } else if (cmds[i].type == CommandType::LAND) {
+            if (cmds[i].content.waypoint.latitude != 0 || cmds[i].content.waypoint.longitude != 0) {
+                targets.push_back({cmds[i].content.waypoint.latitude,
+                                   cmds[i].content.waypoint.longitude,
+                                   cmds[i].content.waypoint.altitude});
+                char buf[128];
+                snprintf(buf, sizeof(buf), "  LAND-WP #%d: lat=%d lon=%d alt=%d",
+                         (int)targets.size()-1,
+                         cmds[i].content.waypoint.latitude,
+                         cmds[i].content.waypoint.longitude,
+                         cmds[i].content.waypoint.altitude);
+                logEntry(buf, ENTITY_NAME, LogLevel::LOG_INFO);
+            }
+        }
+    }
+    if (targets.empty()) {
+        logEntry((char*)"RouteGuard: no WAYPOINTs found", ENTITY_NAME, LogLevel::LOG_WARNING);
+        return;
+    }
+
+    size_t idx = 0;
+    double prevDist = 1e18;
+    int trendUp = 0;          // подряд тиков с ростом dcur
+    int hijackTicks = 0;      // подряд тиков "ближайшая другая"
+    int corrections = 0;      // сколько раз подряд чинили (для эскалации)
+
+    while (!g_stopRouteGuard.load()) {
+        // 0) кулдаун как раньше
+        int64_t nowMs = monoMs();
+        if (nowMs < g_rg.cooldownUntilMs) { std::this_thread::sleep_for(std::chrono::milliseconds(200)); continue; }
+
+        // 1) координаты
+        int32_t lat=0, lon=0, alt=0;
+        if (!getCoords(lat, lon, alt)) { logEntry((char*)"RouteGuard: failed to get coords", ENTITY_NAME, LogLevel::LOG_WARNING); std::this_thread::sleep_for(std::chrono::milliseconds(200)); continue; }
+
+        // 2) движение для арминга (как у тебя)
+        if (!g_rg.haveLast) { g_rg.lastLat = lat; g_rg.lastLon = lon; g_rg.haveLast = true; }
+        else { g_rg.movedAccum += haversineMeters(lat, lon, g_rg.lastLat, g_rg.lastLon); g_rg.lastLat = lat; g_rg.lastLon = lon; }
+
+        // 3) высота и движение: ждём реального старта
+        if (!g_rg.armed) {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "RouteGuard: arming check — movedAccum=%.2f m / %.2f m, alt=%.1f m",
+                    g_rg.movedAccum, STARTUP_MOVE_ARM_M, (double)alt);
+            logEntry(buf, ENTITY_NAME, LogLevel::LOG_INFO);
+
+            if (g_rg.movedAccum >= STARTUP_MOVE_ARM_M && alt >= ALT_ARM_MIN_M) {
+                g_rg.armed = true; g_mode = RGMode::LOCK; g_lock = {}; // стартуем LOCK-ON окно
+                logEntry((char*)"RouteGuard: ARMED → LOCK mode", ENTITY_NAME, LogLevel::LOG_INFO);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+
+        // === режим LOCK-ON: собираем окно, выбираем индекс по наибольшему убыванию дистанции ===
+        if (g_mode == RGMode::LOCK) {
+            // посчитать дистанции до всех целей
+            std::vector<double> dcur_all(targets.size());
+            for (size_t j=0;j<targets.size();++j)
+                dcur_all[j] = haversineMeters(lat, lon, targets[j].lat, targets[j].lon);
+
+            if (g_lock.ticks == 0) {
+                g_lock.d0   = dcur_all;
+                g_lock.prev = dcur_all;
+                g_lock.decr.assign(targets.size(), 0);
+                logEntry((char*)"RouteGuard: LOCK start window", ENTITY_NAME, LogLevel::LOG_INFO);
+            } else {
+                // мажоритарная убыль помежтиково
+                for (size_t j=0;j<targets.size();++j) {
+                    if (g_lock.prev[j] - dcur_all[j] >= LOCK_STEP_MIN_M) g_lock.decr[j]++;
+                }
+                g_lock.prev = dcur_all;
+            }
+            g_lock.ticks++;
+
+            // 1) быстрый lock по близости
+            size_t proxIdx = SIZE_MAX;
+            for (size_t j=0;j<targets.size();++j) {
+                if (dcur_all[j] < NEAR_LOCK_DIST_M) { proxIdx = j; break; }
+            }
+            if (proxIdx != SIZE_MAX) {
+                char buf[160];
+                snprintf(buf, sizeof(buf), "RouteGuard: LOCK by proximity → idx=%zu (%.1f m)",
+                        proxIdx, dcur_all[proxIdx]);
+                logEntry(buf, ENTITY_NAME, LogLevel::LOG_INFO);
+                idx = proxIdx; g_mode = RGMode::GUARD;
+                prevDist = 1e18; trendUp = 0; hijackTicks = 0;
+                logEntry((char*)"RouteGuard: GUARD mode", ENTITY_NAME, LogLevel::LOG_INFO);
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                continue;
+            }
+
+            // ждём завершения окна
+            if (g_lock.ticks < LOCK_WINDOW_TICKS) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                continue;
+            }
+
+            // 2) lock по относительной/абсолютной убыли
+            size_t gainIdx = pickByGain(g_lock.d0, dcur_all, LOCK_MIN_GAIN_ABS_M, LOCK_MIN_GAIN_REL_K);
+
+            // 3) lock по «мажоритарной убыли»
+            size_t majIdx = SIZE_MAX; int bestDecr = 0;
+            for (size_t j=0;j<g_lock.decr.size();++j) {
+                if (g_lock.decr[j] >= LOCK_DECR_TICKS && g_lock.decr[j] > bestDecr) {
+                    bestDecr = g_lock.decr[j]; majIdx = j;
+                }
+            }
+
+            if (gainIdx != SIZE_MAX || majIdx != SIZE_MAX) {
+                size_t lockIdx = (gainIdx != SIZE_MAX ? gainIdx : majIdx);
+                char buf[200];
+                snprintf(buf, sizeof(buf),
+                        "RouteGuard: LOCK resolved → idx=%zu (%s)",
+                        lockIdx, gainIdx != SIZE_MAX ? "by gain" : "by majority");
+                logEntry(buf, ENTITY_NAME, LogLevel::LOG_INFO);
+                idx = lockIdx; g_mode = RGMode::GUARD;
+                prevDist = 1e18; trendUp = 0; hijackTicks = 0;
+                logEntry((char*)"RouteGuard: GUARD mode", ENTITY_NAME, LogLevel::LOG_INFO);
+                // сброс окна
+                g_lock = {};
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                continue;
+            }
+
+            // 4) fallback после нескольких «inconclusive»
+            g_lock.windows++;
+            if (g_lock.windows >= LOCK_MAX_WINDOWS) {
+                size_t limit = std::min((size_t)LOCK_MAX_AHEAD, targets.size()-1);
+                size_t fbIdx = SIZE_MAX; double fbDist = 1e18;
+                for (size_t j=0; j<=limit; ++j) {
+                    if (dcur_all[j] < LOCK_FALLBACK_DIST_M && dcur_all[j] < fbDist) {
+                        fbDist = dcur_all[j]; fbIdx = j;
+                    }
+                }
+                if (fbIdx != SIZE_MAX) {
+                    char buf[200];
+                    snprintf(buf, sizeof(buf),
+                            "RouteGuard: LOCK fallback(first %d) → idx=%zu (%.1f m)",
+                            LOCK_MAX_AHEAD, fbIdx, fbDist);
+                    logEntry(buf, ENTITY_NAME, LogLevel::LOG_WARNING);
+                    idx = fbIdx; g_mode = RGMode::GUARD;
+                    prevDist = 1e18; trendUp = 0; hijackTicks = 0;
+                    logEntry((char*)"RouteGuard: GUARD mode", ENTITY_NAME, LogLevel::LOG_INFO);
+                    g_lock = {};
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                    continue;
+                }
+            }
+
+            // 5) окно не срослось — начать новое
+            logEntry((char*)"RouteGuard: LOCK inconclusive — extend window", ENTITY_NAME, LogLevel::LOG_WARNING);
+            g_lock.ticks = 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            continue;
+        }
+
+        // === режим GUARD: контроль только «нелегальных прыжков» индексов ===
+        double dcur = haversineMeters(lat, lon, targets[idx].lat, targets[idx].lon);
+
+        // нормальный прогресс: достигли текущий → idx++
+        if (dcur < REACH_RADIUS_M && idx + 1 < targets.size()) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "RouteGuard: reached idx=%zu (%.1f m) → %zu", idx, dcur, idx+1);
+            logEntry(buf, ENTITY_NAME, LogLevel::LOG_INFO);
+            idx++; prevDist = 1e18; trendUp = 0; hijackTicks = 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+
+        // найдём ближайший по дистанции
+        size_t best = idx; double bestDist = dcur;
+        for (size_t j = idx+1; j < targets.size(); ++j) {
+            double dj = haversineMeters(lat, lon, targets[j].lat, targets[j].lon);
+            if (dj < bestDist) { bestDist = dj; best = j; }
+        }
+
+        // лог метрик
+        {
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                "Pos: (%d,%d) alt=%d | idx=%zu dcur=%.1f | best=%zu bestDist=%.1f | mode=GUARD",
+                lat, lon, alt, idx, dcur, best, bestDist);
+            logEntry(buf, ENTITY_NAME, LogLevel::LOG_INFO);
+        }
+
+        // --- ключ: допускаем только best == idx или best == idx+1 ---
+        // если best далеко вперёд (>= idx+2) или назад (< idx), считаем подозрительно
+        bool illegalJump = (best + 1 < idx) || (best >= idx + 2);
+        if (illegalJump) {
+            hijackTicks++;
+            char buf[80]; snprintf(buf, sizeof(buf), "RouteGuard: illegalJump best=%zu vs idx=%zu (tick %d)", best, idx, hijackTicks);
+            logEntry(buf, ENTITY_NAME, LogLevel::LOG_WARNING);
+        } else if (hijackTicks > 0) {
+            hijackTicks--;
+        }
+
+        // подтверждение атаки
+        if (hijackTicks >= GUARD_CONFIRM_TICKS) {
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                "RouteGuard: HIJACK CONFIRMED (best=%zu, idx=%zu) → changeWaypoint to idx=%zu",
+                best, idx, idx);
+            logEntry(buf, ENTITY_NAME, LogLevel::LOG_ERROR);
+
+            if (!changeWaypoint(targets[idx].lat, targets[idx].lon, targets[idx].alt)) {
+                logEntry((char*)"RouteGuard: changeWaypoint FAILED → backoff & LOCK again", ENTITY_NAME, LogLevel::LOG_WARNING);
+                // вернуться в LOCK, если миссия/режим сбились
+                g_mode = RGMode::LOCK; g_lock = {};
+                g_rg.cooldownUntilMs = nowMs + NO_MISSION_COOLDOWN_MS;
+                g_rg.armed = false; g_rg.movedAccum = 0.0; g_rg.haveLast = false;
+                hijackTicks = 0; trendUp = 0; prevDist = 1e18;
+            } else {
+                logEntry((char*)"RouteGuard: changeWaypoint OK", ENTITY_NAME, LogLevel::LOG_INFO);
+                hijackTicks = 0; trendUp = 0; prevDist = 1e18;
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    }
+
+}
 /**
  * \~English Procedure that checks connection to the ATM server.
  * \~Russian Процедура, проверяющая наличие соединения с сервером ОРВД.
@@ -324,6 +669,8 @@ int main(void) {
             //Start ORVD threads
             sessionThread = std::thread(pingSession);
             updateThread = std::thread(serverUpdateCheck);
+            std::thread routeGuard(routeGuardThreadFunc);
+            routeGuard.detach();
             break;
         }
         else if (strstr(subscriptionBuffer, "$Arm 1$")) {
