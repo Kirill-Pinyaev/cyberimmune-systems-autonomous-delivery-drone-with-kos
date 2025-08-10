@@ -6,7 +6,13 @@
 
 #pragma once
 #include <stdint.h>
+#ifndef CARGO_SERVO_CHANNEL
+#define CARGO_SERVO_CHANNEL 8
+#endif
 
+#ifndef CARGO_UNLOCK_RADIUS_M
+#define CARGO_UNLOCK_RADIUS_M 4
+#endif
 /** \cond */
 #define AREA_NAME_MAX_LEN 32
 /** \endcond */
@@ -341,6 +347,11 @@ uint32_t getMissionBytesSize(MissionCommand* commands, uint8_t num);
  * \param[in] areas Строка, пришедшая от сервера ОРВД. Ожидается в виде "$ForbiddenZones зоны#".
  * \return Возвращает 1, если зоны были успешно распознаны, иначе -- 0.
  */
+
+
+void initCargoProtection();
+void onServoCommandRequested(int32_t channel, int32_t pwm);
+
 int loadNoFlightAreas(char* areas);
 /**
  * \~English Converts a string with changes in no-flight areas received from the ATM server, and updates current no-flight areas array.
