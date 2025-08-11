@@ -77,14 +77,22 @@ void serverUpdateCheck() {
                 uint8_t authenticity = 0;
                 if (checkSignature(message, authenticity) || !authenticity) {
                     if (strstr(message, "$Flight -1#")) {
-                        logEntry("Emergency stop request is received. Disabling motors", ENTITY_NAME, LogLevel::LOG_INFO);
-                        if (!enableBuzzer())
-                            logEntry("Failed to enable buzzer", ENTITY_NAME, LogLevel::LOG_WARNING);
-                        while (!setKillSwitch(false)) {
-                            logEntry("Failed to forbid motor usage. Trying again in 1s", ENTITY_NAME, LogLevel::LOG_WARNING);
-                            sleep(1);
+                            logEntry("Emergency stop request is received. Disabling motors", ENTITY_NAME, LogLevel::LOG_INFO);
+                            if (!enableBuzzer())
+                                logEntry("Failed to enable buzzer", ENTITY_NAME, LogLevel::LOG_WARNING);
+                            while (!setKillSwitch(false)) {
+                                logEntry("Failed to forbid motor usage. Trying again in 1s", ENTITY_NAME, LogLevel::LOG_WARNING);
+                                sleep(1);
+                            }
                         }
-                    }
+                        else if (strstr(message, "$Flight 1#")) {
+                            logEntry("Stop request is received. Landing", ENTITY_NAME, LogLevel::LOG_INFO);
+                            pauseFlight(); // <-- вызов с точкой с запятой
+                        }
+                        else if (strstr(message, "$Flight 0#")) {
+                            logEntry("Resume request is received. Taking off", ENTITY_NAME, LogLevel::LOG_INFO);
+                            resumeFlight();
+                        }
                     //The message has two other possible options:
                     //  "$Flight 1#" that requires to pause flight and remain landed
                     //  "$Flight 0#" that requires to resume flight and keep flying
