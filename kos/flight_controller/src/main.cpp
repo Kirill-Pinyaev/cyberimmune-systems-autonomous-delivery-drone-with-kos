@@ -106,6 +106,56 @@ void serverUpdateCheck() {
                     logEntry("New no-flight areas are received from the server", ENTITY_NAME, LogLevel::LOG_INFO);
                     printNoFlightAreas();
                     //Path recalculation must be done if current path crosses new no-flight areas
+<<<<<<< Updated upstream
+=======
+                   /*if (!abortMission()) {
+                        logEntry("Failed to abort mission through Autopilot Connector", ENTITY_NAME, LogLevel::LOG_WARNING);
+                        continue;
+                    } 
+
+                    // Получаем текущие координаты для "зависания"
+                    int32_t lat, lng, alt;
+                    if (!getCoords(lat, lng, alt)) {
+                        logEntry("Failed to get current coordinates from Navigation System", ENTITY_NAME, LogLevel::LOG_WARNING);
+                        continue;
+                    }
+
+                    //Функция построения нового маршрута Надо сделать 
+
+
+
+                    int approvalResult = 0;
+                    if (!askForMissionApproval(newMissionStr, approvalResult)) {
+                        logEntry("Failed to get mission approval from server", ENTITY_NAME, LogLevel::LOG_WARNING);
+                        continue;
+                    }
+
+                    if (approvalResult) {
+                        // 3. Если ОРВД подтвердила, загружаем новую миссию в автопилот
+                        uint32_t missionSize = getMissionBytesSize(newCommands, 2);
+                        uint8_t* missionBytes = (uint8_t*)malloc(missionSize);
+                        if (!missionToBytes(newCommands, 2, missionBytes)) {
+                            logEntry("Failed to convert new mission to bytes", ENTITY_NAME, LogLevel::LOG_WARNING);
+                            free(missionBytes);
+                            continue;
+                        }
+                        
+                        if (!setMission(missionBytes, missionSize)) {
+                            logEntry("Failed to set new mission in autopilot", ENTITY_NAME, LogLevel::LOG_WARNING);
+                        } else {
+                            logEntry("New mission with no-flight areas avoidance has been set", ENTITY_NAME, LogLevel::LOG_INFO);
+                        }
+                        free(missionBytes);
+                        
+                        // 4. Возобновляем полёт
+                        if (!resumeFlight()) {
+                            logEntry("Failed to resume flight through Autopilot Connector", ENTITY_NAME, LogLevel::LOG_WARNING);
+                        }
+                    } else {
+                        logEntry("New mission was not approved by ORVD server", ENTITY_NAME, LogLevel::LOG_WARNING);
+                    }*/
+                    
+>>>>>>> Stashed changes
                 }
                 else
                     logEntry("Failed to check signature of no-flight areas received through Server Connector", ENTITY_NAME, LogLevel::LOG_WARNING);
@@ -170,6 +220,46 @@ int askForMissionApproval(char* mission, int& result) {
     free(message);
     return 1;
 }
+
+    void doSetNormalSpeed()
+    {
+        sleep(sessionDelay);
+
+        char pingMessage[1024] = {0};
+        while (true)
+        {
+        
+        float currentSpeed;
+        char logBuffer[256] = {0};
+
+        while (true)
+        {
+            getEstimatedSpeed(currentSpeed);
+            snprintf(logBuffer, 256, "Current speed %.7f", currentSpeed);
+            logEntry(logBuffer, ENTITY_NAME, LogLevel::LOG_INFO);
+            if (currentSpeed > 0.6 || (currentSpeed > 0.1 && currentSpeed <= 0.3))
+            {
+                snprintf(logBuffer, 256, "Changed speed! Current speed %.4f", currentSpeed);
+            if (getEstimatedSpeed(currentSpeed)) {
+                snprintf(logBuffer, 256, "Current speed %.7f", currentSpeed);
+                logEntry(logBuffer, ENTITY_NAME, LogLevel::LOG_INFO);
+                // setKillSwitch(0);
+                changeSpeed(50);
+                // setKillSwitch(1);
+                if (currentSpeed > 0.6 || (currentSpeed > 0.1 && currentSpeed <= 0.3))
+                {
+                    snprintf(logBuffer, 256, "Changed speed! Current speed %.4f", currentSpeed);
+                    logEntry(logBuffer, ENTITY_NAME, LogLevel::LOG_INFO);
+                    // setKillSwitch(0);
+                    changeSpeed(50);
+                    // setKillSwitch(1);
+                }
+                sleep(1);
+            }
+            }
+        }
+        }
+    }
 
 /**
  * \~English Security module main loop. Waits for all other components to initialize. Authenticates
@@ -324,6 +414,13 @@ int main(void) {
             //Start ORVD threads
             sessionThread = std::thread(pingSession);
             updateThread = std::thread(serverUpdateCheck);
+<<<<<<< Updated upstream
+=======
+            speedThread = std::thread(doSetNormalSpeed);
+            Changesroutethread = std::routeThread(monitorRouteChanges);  /
+            MonitorInterestthread = std::interestThread(monitorInterestPoints);
+
+>>>>>>> Stashed changes
             break;
         }
         else if (strstr(subscriptionBuffer, "$Arm 1$")) {
