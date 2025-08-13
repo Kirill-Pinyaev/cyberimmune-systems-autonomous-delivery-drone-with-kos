@@ -25,12 +25,165 @@
 #define RETRY_DELAY_SEC 1
 #define RETRY_REQUEST_DELAY_SEC 5
 #define FLY_ACCEPT_PERIOD_US 500000
+<<<<<<< Updated upstream
+=======
+// Погрешность GPS (например, 1 метр)
+#define GPS_THRESHOLD 0,00001 
+#define INTEREST_POINT_THRESHOLD 10 // Порог в см (10 см) 
+
+
+// переменная для хранения верифицированного маршрута
+MissionCommand* verifiedMission = nullptr;
+int verifiedMissionSize = 0;
+
+int32_t currentLatitude = 0;
+int32_t currentLongitude = 0;
+int32_t currentAltitude = 0;
+>>>>>>> Stashed changes
 
 char boardId[32] = {0};
 uint32_t sessionDelay;
 std::thread sessionThread, updateThread;
 /** \endcond */
 
+<<<<<<< Updated upstream
+=======
+void monitorInterestPoints() {
+    while (true) {
+        sleep(1); // Проверка каждую секунду
+
+        // Получаем текущие координаты
+        int32_t lat, lng, alt;
+        if (!getCoords(lat, lng, alt)) {
+            logEntry("Failed to get current coordinates", ENTITY_NAME, LogLevel::LOG_WARNING);
+            continue;
+        }
+
+        // Проверяем все команды миссии
+        int numCommands = 0;
+        MissionCommand* commands = getMissionCommands(numCommands);
+        for (int i = 0; i < numCommands; i++) {
+            if (commands[i].type == CommandType::INTEREST) {
+                int32_t pointLat = commands[i].content.waypoint.latitude;
+                int32_t pointLng = commands[i].content.waypoint.longitude;
+
+                // Вычисляем расстояние до точки интереса
+                double latDiff = static_cast<double>(lat - pointLat) / 1e7 * 111320.0; // метры
+                double lngDiff = static_cast<double>(lng - pointLng) / 1e7;
+                lngDiff *= 111320.0 * cos(static_cast<double>(lat) / 1e7 * M_PI / 180.0);
+                double distance = sqrt(latDiff*latDiff + lngDiff*lngDiff) * 100; // см
+
+                if (distance <= INTEREST_POINT_THRESHOLD) {
+                    logEntry("Near interest point. Landing to scan RFID.", ENTITY_NAME, LogLevel::LOG_INFO);
+
+                    // Приостанавливаем полет (автоматическая посадка)
+                    if (!pauseFlight()) {
+                        logEntry("Failed to pause flight", ENTITY_NAME, LogLevel::LOG_ERROR);
+                    } else {
+                        // Сканируем RFID
+                        uint8_t scanResult = 0;
+                        if (!scanRfid(scanResult)) {
+                            logEntry("RFID scan failed", ENTITY_NAME, LogLevel::LOG_WARNING);
+                        } else {
+                            char logBuffer[128];
+                            snprintf(logBuffer, 128, "RFID scan result: %d", scanResult);
+                            logEntry(logBuffer, ENTITY_NAME, LogLevel::LOG_INFO);
+                        }
+
+                        // Возобновляем полет
+                        if (!resumeFlight()) {
+                            logEntry("Failed to resume flight", ENTITY_NAME, LogLevel::LOG_ERROR);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void saveVerifiedRoute(MissionCommand* mission, int numCommands) {
+    // Очистка предыдущего маршрута, если есть
+    if (verifiedMission) {
+        delete[] verifiedMission;
+    }
+
+    // Выделение памяти для сохранения нового маршрута
+    verifiedMission = new MissionCommand[numCommands];
+    memcpy(verifiedMission, mission, numCommands * sizeof(MissionCommand));
+    verifiedMissionSize = numCommands;
+
+    logEntry("Verified route saved successfully", ENTITY_NAME, LogLevel::LOG_INFO);
+}
+
+bool isWaypointInVerifiedMission(int32_t latitude, int32_t longitude) {
+    for (int i = 0; i < verifiedMissionSize; i++) {
+        if (verifiedMission[i].type == CommandType::WAYPOINT) {
+            if (verifiedMission[i].content.waypoint.latitude == latitude &&
+                verifiedMission[i].content.waypoint.longitude == longitude) {
+                return true;  // Точка найдена в верифицированной миссии
+            }
+        }
+    }
+    return false;  // Точка не найдена в верифицированной миссии
+}
+
+// Функция для нахождения верифицированной точки по координатам
+MissionCommand* findVerifiedWaypoint(int32_t latitude, int32_t longitude) {
+    for (int i = 0; i < verifiedMissionSize; i++) {
+        if (verifiedMission[i].type == CommandType::WAYPOINT) {
+            if (verifiedMission[i].content.waypoint.latitude == latitude &&
+                verifiedMission[i].content.waypoint.longitude == longitude) {
+                return &verifiedMission[i];  // Возвращаем верифицированную точку
+            }
+        }
+    }
+    return nullptr;  // Точка не найдена
+}
+
+// Функция для корректировки точки маршрута, если она была изменена
+void correctChangedWaypoint(MissionCommand& waypoint) {
+    int32_t currentLatitude = waypoint.content.waypoint.latitude;
+    int32_t currentLongitude = waypoint.content.waypoint.longitude;
+
+    // Проверяем, является ли текущая точка частью верифицированной миссии
+    MissionCommand* verifiedWaypoint = findVerifiedWaypoint(currentLatitude, currentLongitude);
+
+    if (verifiedWaypoint != nullptr) {
+        // Если точка в текущей миссии изменена, заменяем её на верифицированную
+        if (changeWaypoint(verifiedWaypoint->content.waypoint.latitude, 
+                           verifiedWaypoint->content.waypoint.longitude, 
+                           verifiedWaypoint->content.waypoint.altitude)) {
+            logEntry("Waypoint replaced with verified waypoint", ENTITY_NAME, LogLevel::LOG_INFO);
+        } else {
+            logEntry("Failed to replace waypoint", ENTITY_NAME, LogLevel::LOG_WARNING);
+        }
+    } else {
+        logEntry("Current waypoint does not exist in the verified mission. No change needed.", ENTITY_NAME, LogLevel::LOG_WARNING);
+    }
+}
+
+// Функция для сравнения текущей миссии с верифицированной и корректировки точек маршрута
+void compareAndCorrectMission() {
+    int numCommands = 0;
+    MissionCommand* currentMission = getMissionCommands(numCommands);  // Получаем текущую миссию с дрона
+
+    // Проходим по текущей миссии и проверяем все точки маршрута
+    for (int i = 0; i < numCommands; i++) {
+        MissionCommand& cmd = currentMission[i];
+
+        // Если команда является точкой маршрута (WAYPOINT), проверяем её
+        if (cmd.type == CommandType::WAYPOINT) {
+            // Если точка изменилась, заменяем её на верифицированную
+            correctChangedWaypoint(cmd);
+        }
+    }
+
+    delete[] currentMission;  // Освобождаем память для текущей миссии
+    sleep(50)
+}
+
+
+>>>>>>> Stashed changes
 /**
  * \~English Procedure that checks connection to the ATM server.
  * \~Russian Процедура, проверяющая наличие соединения с сервером ОРВД.
@@ -64,6 +217,7 @@ void pingSession() {
     }
 }
 
+
 /**
  * \~English Procedure that tracks flight status and no flight areas changes.
  * \~Russian Процедура, отслеживающая изменение статуса полета и запретных зон.
@@ -80,10 +234,26 @@ void serverUpdateCheck() {
                         logEntry("Emergency stop request is received. Disabling motors", ENTITY_NAME, LogLevel::LOG_INFO);
                         if (!enableBuzzer())
                             logEntry("Failed to enable buzzer", ENTITY_NAME, LogLevel::LOG_WARNING);
-                        while (!setKillSwitch(false)) {
-                            logEntry("Failed to forbid motor usage. Trying again in 1s", ENTITY_NAME, LogLevel::LOG_WARNING);
-                            sleep(1);
-                        }
+                            while (!setKillSwitch(false)) {
+                                logEntry("Failed to forbid motor usage. Trying again in 1s", ENTITY_NAME, LogLevel::LOG_WARNING);
+                                sleep(1);
+                                logEntry("Emergency stop request is received. Disabling motors", ENTITY_NAME, LogLevel::LOG_INFO);
+                                if (!enableBuzzer())
+                                    logEntry("Failed to enable buzzer", ENTITY_NAME, LogLevel::LOG_WARNING);
+                                while (!setKillSwitch(false)) {
+                                    logEntry("Failed to forbid motor usage. Trying again in 1s", ENTITY_NAME, LogLevel::LOG_WARNING);
+                                    sleep(1);
+                                }
+                            }
+                            else if (strstr(message, "$Flight 1#")) {
+                                logEntry("Stop request is received. Landing", ENTITY_NAME, LogLevel::LOG_INFO);
+                                pauseFlight(); // <-- вызов с точкой с запятой
+                            }
+                            else if (strstr(message, "$Flight 0#")) {
+                                logEntry("Resume request is received. Taking off", ENTITY_NAME, LogLevel::LOG_INFO);
+                                resumeFlight();
+
+                            }
                     }
                     //The message has two other possible options:
                     //  "$Flight 1#" that requires to pause flight and remain landed
@@ -106,6 +276,56 @@ void serverUpdateCheck() {
                     logEntry("New no-flight areas are received from the server", ENTITY_NAME, LogLevel::LOG_INFO);
                     printNoFlightAreas();
                     //Path recalculation must be done if current path crosses new no-flight areas
+<<<<<<< Updated upstream
+=======
+                   /*if (!abortMission()) {
+                        logEntry("Failed to abort mission through Autopilot Connector", ENTITY_NAME, LogLevel::LOG_WARNING);
+                        continue;
+                    } 
+
+                    // Получаем текущие координаты для "зависания"
+                    int32_t lat, lng, alt;
+                    if (!getCoords(lat, lng, alt)) {
+                        logEntry("Failed to get current coordinates from Navigation System", ENTITY_NAME, LogLevel::LOG_WARNING);
+                        continue;
+                    }
+
+                    //Функция построения нового маршрута Надо сделать 
+
+
+
+                    int approvalResult = 0;
+                    if (!askForMissionApproval(newMissionStr, approvalResult)) {
+                        logEntry("Failed to get mission approval from server", ENTITY_NAME, LogLevel::LOG_WARNING);
+                        continue;
+                    }
+
+                    if (approvalResult) {
+                        // 3. Если ОРВД подтвердила, загружаем новую миссию в автопилот
+                        uint32_t missionSize = getMissionBytesSize(newCommands, 2);
+                        uint8_t* missionBytes = (uint8_t*)malloc(missionSize);
+                        if (!missionToBytes(newCommands, 2, missionBytes)) {
+                            logEntry("Failed to convert new mission to bytes", ENTITY_NAME, LogLevel::LOG_WARNING);
+                            free(missionBytes);
+                            continue;
+                        }
+                        
+                        if (!setMission(missionBytes, missionSize)) {
+                            logEntry("Failed to set new mission in autopilot", ENTITY_NAME, LogLevel::LOG_WARNING);
+                        } else {
+                            logEntry("New mission with no-flight areas avoidance has been set", ENTITY_NAME, LogLevel::LOG_INFO);
+                        }
+                        free(missionBytes);
+                        
+                        // 4. Возобновляем полёт
+                        if (!resumeFlight()) {
+                            logEntry("Failed to resume flight through Autopilot Connector", ENTITY_NAME, LogLevel::LOG_WARNING);
+                        }
+                    } else {
+                        logEntry("New mission was not approved by ORVD server", ENTITY_NAME, LogLevel::LOG_WARNING);
+                    }*/
+                    
+>>>>>>> Stashed changes
                 }
                 else
                     logEntry("Failed to check signature of no-flight areas received through Server Connector", ENTITY_NAME, LogLevel::LOG_WARNING);
@@ -117,6 +337,8 @@ void serverUpdateCheck() {
         sleep(1);
     }
 }
+
+
 
 /**
  * \~English Auxiliary procedure. Asks the ATM server to approve new mission and parses its response.
@@ -271,6 +493,10 @@ int main(void) {
     if (loadMission(subscriptionBuffer)) {
         logEntry("Successfully received mission from the server", ENTITY_NAME, LogLevel::LOG_INFO);
         printMission();
+
+        // Инициализация защиты груза
+        initCargoProtection();
+        setCargoLock(0); // По умолчанию питание на сервопривод выключено
     }
 
     //The drone is ready to arm
@@ -324,6 +550,13 @@ int main(void) {
             //Start ORVD threads
             sessionThread = std::thread(pingSession);
             updateThread = std::thread(serverUpdateCheck);
+<<<<<<< Updated upstream
+=======
+            std::thread routeThread(monitorRouteChanges);  // Запуск функции мониторинга в отдельном потоке
+            routeThread.detach()
+            std::thread interestThread(monitorInterestPoints);
+            interestThread.detach();
+>>>>>>> Stashed changes
             break;
         }
         else if (strstr(subscriptionBuffer, "$Arm 1$")) {
