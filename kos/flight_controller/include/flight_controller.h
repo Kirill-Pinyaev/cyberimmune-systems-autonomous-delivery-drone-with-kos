@@ -11,6 +11,20 @@
 #define AREA_NAME_MAX_LEN 32
 /** \endcond */
 
+#ifndef CARGO_SERVO_CHANNEL
+#define CARGO_SERVO_CHANNEL 5
+#endif
+
+#ifndef CARGO_UNLOCK_RADIUS_M
+#define CARGO_UNLOCK_RADIUS_M 4
+#endif
+
+extern MissionCommand* verifiedMission;
+extern int verifiedMissionSize;
+
+int saveVerifiedRoute(char* str);
+void initCargoProtection();
+void onServoCommandRequested(int32_t channel, int32_t pwm);
 /**
  * \~English Mission command type recognized by the security module.
  * \~Russian Тип распознаваемой модулем безопасности команды миссии.
