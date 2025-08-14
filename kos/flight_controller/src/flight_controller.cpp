@@ -14,6 +14,14 @@
 
 #include <mbedtls/sha256.h>
 
+#include "../../shared/include/ipc_messages_navigation_system.h"
+#include "../../shared/include/ipc_messages_periphery_controller.h"
+#include <math.h>
+#include <vector>
+
+MissionCommand* verifiedMission = nullptr;
+int verifiedMissionSize = 0;
+
 /** \cond */
 #define COMMAND_MAX_STRING_LEN 32
 
@@ -24,6 +32,7 @@ uint32_t areaNum = 0;
 NoFlightArea *areas = NULL;
 char areasHash[65] = {0};
 /** \endcond */
+
 
 
 /**
@@ -108,6 +117,136 @@ int parseInt(char*& string, int32_t& value, uint32_t numAfterPoint) {
         }
     stringValue[valPtr] = '\0';
     value = atoi(stringValue);
+    return 1;
+}
+
+int saveVerifiedRoute(char* str) {
+    int commandNum = 0;
+
+    // Подсчитываем количество команд
+    for (uint32_t i = 0; ; i++) {
+        if (str[i] == '#') break;
+        else if (str[i] == 'H' || str[i] == 'T' || str[i] == 'W' || str[i] == 'L' || str[i] == 'S' || str[i] == 'D' || str[i] == 'I')
+            commandNum++;
+        else if (str[i] == '\0') {
+            logEntry("Cannot parse commands: no correct ending", ENTITY_NAME, LogLevel::LOG_WARNING);
+            return 0;
+        }
+    }
+
+    if (commandNum == 0) {
+        logEntry("Mission contains no commands", ENTITY_NAME, LogLevel::LOG_WARNING);
+        return 0;
+    }
+
+    // Выделяем память для подтвержденных команд
+    MissionCommand* verifiedCommands = (MissionCommand*)malloc(commandNum * sizeof(MissionCommand));
+    if (verifiedCommands == nullptr) {
+        logEntry("Memory allocation failed for verified commands", ENTITY_NAME, LogLevel::LOG_ERROR);
+        return 0;
+    }
+
+    uint32_t ptr = 0;
+    int verifiedCommandCount = 0;
+    
+    // Парсим и сохраняем подтвержденные команды
+    for (uint32_t i = 0; i < commandNum; i++) {
+        uint32_t end = ptr;
+        for (uint32_t j = ptr + 1; ; j++) {
+            if (str[j] == '&' || str[j] == '#') {
+                end = j;
+                break;
+            }
+            else if (str[j] == '\0') {
+                logEntry("Failed to parse commands: unexpected string end", ENTITY_NAME, LogLevel::LOG_WARNING);
+                free(verifiedCommands);
+                return 0;
+            }
+        }
+        char* stringPtr = str + ptr + 1;
+        int32_t lat, lng, alt;
+        
+        // Обработка каждой команды
+        switch (str[ptr]) {
+            case 'H':
+                if (!parseInt(stringPtr, lat, 7) || !parseInt(stringPtr, lng, 7) || !parseInt(stringPtr, alt, 2)) {
+                    logEntry("Failed to parse values for 'home' command", ENTITY_NAME, LogLevel::LOG_WARNING);
+                    free(verifiedCommands);
+                    return 0;
+                }
+                verifiedCommands[verifiedCommandCount].type = CommandType::HOME;
+                verifiedCommands[verifiedCommandCount].content.waypoint = CommandWaypoint(lat, lng, alt);
+                break;
+            case 'T':
+                if (!parseInt(stringPtr, alt, 2)) {
+                    logEntry("Failed to parse values for 'takeoff' command", ENTITY_NAME, LogLevel::LOG_WARNING);
+                    free(verifiedCommands);
+                    return 0;
+                }
+                verifiedCommands[verifiedCommandCount].type = CommandType::TAKEOFF;
+                verifiedCommands[verifiedCommandCount].content.takeoff = CommandTakeoff(alt);
+                break;
+            case 'W': {
+                if (!parseInt(stringPtr, lat, 7) || !parseInt(stringPtr, lng, 7) || !parseInt(stringPtr, alt, 2)) {
+                    logEntry("Failed to parse values for 'waypoint' command", ENTITY_NAME, LogLevel::LOG_WARNING);
+                    free(verifiedCommands);
+                    return 0;
+                }
+                verifiedCommands[verifiedCommandCount].type = CommandType::WAYPOINT;
+                verifiedCommands[verifiedCommandCount].content.waypoint = CommandWaypoint(lat, lng, alt);
+                break;
+            }
+            case 'L':
+                if (!parseInt(stringPtr, lat, 7) || !parseInt(stringPtr, lng, 7) || !parseInt(stringPtr, alt, 2)) {
+                    logEntry("Failed to parse values for 'land' command", ENTITY_NAME, LogLevel::LOG_WARNING);
+                    free(verifiedCommands);
+                    return 0;
+                }
+                verifiedCommands[verifiedCommandCount].type = CommandType::LAND;
+                verifiedCommands[verifiedCommandCount].content.waypoint = CommandWaypoint(lat, lng, alt);
+                break;
+            case 'S': {
+                int32_t num, pwm;
+                if (!parseInt(stringPtr, num, 0) || !parseInt(stringPtr, pwm, 0)) {
+                    logEntry("Failed to parse values for 'set servo' command", ENTITY_NAME, LogLevel::LOG_WARNING);
+                    free(verifiedCommands);
+                    return 0;
+                }
+                verifiedCommands[verifiedCommandCount].type = CommandType::SET_SERVO;
+                verifiedCommands[verifiedCommandCount].content.servo = CommandServo(num, pwm);
+                break;
+            }
+            case 'D': {
+                if (!parseInt(stringPtr, alt, 0)) {
+                    logEntry("Failed to parse values for 'delay' command", ENTITY_NAME, LogLevel::LOG_WARNING);
+                    free(verifiedCommands);
+                    return 0;
+                }
+                verifiedCommands[verifiedCommandCount].type = CommandType::DELAY;
+                verifiedCommands[verifiedCommandCount].content.delay = CommandDelay(alt);
+                break;
+            }
+            case 'I': {
+                if (!parseInt(stringPtr, lat, 7) || !parseInt(stringPtr, lng, 7) || !parseInt(stringPtr, alt, 2)) {
+                    logEntry("Failed to parse values for 'interest' command", ENTITY_NAME, LogLevel::LOG_WARNING);
+                    free(verifiedCommands);
+                    return 0;
+                }
+                verifiedCommands[verifiedCommandCount].type = CommandType::INTEREST;
+                verifiedCommands[verifiedCommandCount].content.waypoint = CommandWaypoint(lat, lng, alt);
+                break;
+            }
+            default:
+                logEntry("Cannot parse an unknown command", ENTITY_NAME, LogLevel::LOG_WARNING);
+                free(verifiedCommands);
+                return 0;
+        }
+        verifiedCommandCount++;
+        ptr = end + 1;
+    }
+
+    // Сохраняем подтвержденные команды в verifiedMission или аналогичную переменную
+    verifiedMission = verifiedCommands;  // Указатель на сохраненные команды
     return 1;
 }
 
@@ -803,3 +942,100 @@ uint32_t parseDelay(char* response) {
     logEntry("Failed to parse delay until next session: setting it to 1s", ENTITY_NAME, LogLevel::LOG_WARNING);
     return 1;
 }
+
+// === Cargo drop safety protection implementation ===
+struct DropPoint { int32_t lat; int32_t lng; int32_t alt; };
+static std::vector<DropPoint> authorizedDrops;
+
+static double distanceMeters(int32_t lat1_e7, int32_t lng1_e7, int32_t lat2_e7, int32_t lng2_e7) {
+    const double R = 6371000.0;
+    double lat1 = lat1_e7 / 1e7 * M_PI / 180.0;
+    double lat2 = lat2_e7 / 1e7 * M_PI / 180.0;
+    double dlat = lat2 - lat1;
+    double lon1 = lng1_e7 / 1e7 * M_PI / 180.0;
+    double lon2 = lng2_e7 / 1e7 * M_PI / 180.0;
+    double dlon = lon2 - lon1;
+    double a = sin(dlat/2)*sin(dlat/2) + cos(lat1)*cos(lat2)*sin(dlon/2)*sin(dlon/2);
+    double c = 2 * atan2(sqrt(a), sqrt(1-a));
+    return R * c;
+}
+
+void initCargoProtection() {
+    authorizedDrops.clear();
+    int num = 0;
+    MissionCommand* cmds = getMissionCommands(num);
+    if (!cmds || num == 0) {
+        logEntry("CargoProtection: mission is empty", ENTITY_NAME, LOG_INFO);
+        return;
+    }
+
+    for (int i = 0; i < num; i++) {
+        if (cmds[i].type == CommandType::SET_SERVO &&
+            cmds[i].content.servo.number == CARGO_SERVO_CHANNEL) {
+            for (int j = i - 1; j >= 0; j--) {
+                if (cmds[j].type == CommandType::WAYPOINT ||
+                    cmds[j].type == CommandType::LAND ||
+                    cmds[j].type == CommandType::INTEREST ||
+                    cmds[j].type == CommandType::HOME) {
+                    authorizedDrops.push_back({
+                        cmds[j].content.waypoint.latitude,
+                        cmds[j].content.waypoint.longitude,
+                        cmds[j].content.waypoint.altitude
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "CargoProtection: %zu points loaded", authorizedDrops.size());
+    logEntry(buf, ENTITY_NAME, LOG_INFO);
+}
+
+void onServoCommandRequested(int32_t channel, int32_t pwm) {
+    if (channel != CARGO_SERVO_CHANNEL) {
+        // Здесь — передать команду сервоприводу в автопилот обычным способом
+        return;
+    }
+
+    if (authorizedDrops.empty()) {
+        logEntry("CargoProtection: no authorized points", ENTITY_NAME, LOG_WARNING);
+        setCargoLock(0);
+        return;
+    }
+
+    int32_t lat=0, lng=0, alt=0;
+    if (!getCoords(lat, lng, alt)) {
+        logEntry("CargoProtection: failed to get coords", ENTITY_NAME, LOG_WARNING);
+        setCargoLock(0);
+        return;
+    }
+
+    bool allowed = false;
+    for (auto &p : authorizedDrops) {
+        if (distanceMeters(lat, lng, p.lat, p.lng) <= CARGO_UNLOCK_RADIUS_M) {
+            allowed = true;
+            break;
+        }
+    }
+
+    if (!allowed) {
+        logEntry("CargoProtection: drop refused - wrong location", ENTITY_NAME, LOG_WARNING);
+        setCargoLock(0);
+        return;
+    }
+
+    if (!setCargoLock(1)) {
+        logEntry("CargoProtection: failed to enable cargo power", ENTITY_NAME, LOG_WARNING);
+        return;
+    }
+
+    logEntry("CargoProtection: cargo power enabled, executing drop", ENTITY_NAME, LOG_INFO);
+
+    // Здесь — передать команду сервоприводу в автопилот обычным способом
+
+    setCargoLock(0);
+    logEntry("CargoProtection: cargo power disabled after drop", ENTITY_NAME, LOG_INFO);
+}
+// === End cargo drop safety protection implementation ===
