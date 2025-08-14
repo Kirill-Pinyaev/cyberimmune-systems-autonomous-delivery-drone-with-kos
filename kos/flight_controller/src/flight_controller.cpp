@@ -14,6 +14,11 @@
 
 #include <mbedtls/sha256.h>
 
+#include "../../shared/include/ipc_messages_navigation_system.h"
+#include "../../shared/include/ipc_messages_periphery_controller.h"
+#include <math.h>
+#include <vector>
+
 /** \cond */
 #define COMMAND_MAX_STRING_LEN 32
 
@@ -803,3 +808,100 @@ uint32_t parseDelay(char* response) {
     logEntry("Failed to parse delay until next session: setting it to 1s", ENTITY_NAME, LogLevel::LOG_WARNING);
     return 1;
 }
+
+// === Cargo drop safety protection implementation ===
+struct DropPoint { int32_t lat; int32_t lng; int32_t alt; };
+static std::vector<DropPoint> authorizedDrops;
+
+static double distanceMeters(int32_t lat1_e7, int32_t lng1_e7, int32_t lat2_e7, int32_t lng2_e7) {
+    const double R = 6371000.0;
+    double lat1 = lat1_e7 / 1e7 * M_PI / 180.0;
+    double lat2 = lat2_e7 / 1e7 * M_PI / 180.0;
+    double dlat = lat2 - lat1;
+    double lon1 = lng1_e7 / 1e7 * M_PI / 180.0;
+    double lon2 = lng2_e7 / 1e7 * M_PI / 180.0;
+    double dlon = lon2 - lon1;
+    double a = sin(dlat/2)*sin(dlat/2) + cos(lat1)*cos(lat2)*sin(dlon/2)*sin(dlon/2);
+    double c = 2 * atan2(sqrt(a), sqrt(1-a));
+    return R * c;
+}
+
+void initCargoProtection() {
+    authorizedDrops.clear();
+    int num = 0;
+    MissionCommand* cmds = getMissionCommands(num);
+    if (!cmds || num == 0) {
+        logEntry("CargoProtection: mission is empty", ENTITY_NAME, LOG_INFO);
+        return;
+    }
+
+    for (int i = 0; i < num; i++) {
+        if (cmds[i].type == CommandType::SET_SERVO &&
+            cmds[i].content.servo.number == CARGO_SERVO_CHANNEL) {
+            for (int j = i - 1; j >= 0; j--) {
+                if (cmds[j].type == CommandType::WAYPOINT ||
+                    cmds[j].type == CommandType::LAND ||
+                    cmds[j].type == CommandType::INTEREST ||
+                    cmds[j].type == CommandType::HOME) {
+                    authorizedDrops.push_back({
+                        cmds[j].content.waypoint.latitude,
+                        cmds[j].content.waypoint.longitude,
+                        cmds[j].content.waypoint.altitude
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "CargoProtection: %zu points loaded", authorizedDrops.size());
+    logEntry(buf, ENTITY_NAME, LOG_INFO);
+}
+
+void onServoCommandRequested(int32_t channel, int32_t pwm) {
+    if (channel != CARGO_SERVO_CHANNEL) {
+        // Здесь — передать команду сервоприводу в автопилот обычным способом
+        return;
+    }
+
+    if (authorizedDrops.empty()) {
+        logEntry("CargoProtection: no authorized points", ENTITY_NAME, LOG_WARNING);
+        setCargoLock(0);
+        return;
+    }
+
+    int32_t lat=0, lng=0, alt=0;
+    if (!getCoords(lat, lng, alt)) {
+        logEntry("CargoProtection: failed to get coords", ENTITY_NAME, LOG_WARNING);
+        setCargoLock(0);
+        return;
+    }
+
+    bool allowed = false;
+    for (auto &p : authorizedDrops) {
+        if (distanceMeters(lat, lng, p.lat, p.lng) <= CARGO_UNLOCK_RADIUS_M) {
+            allowed = true;
+            break;
+        }
+    }
+
+    if (!allowed) {
+        logEntry("CargoProtection: drop refused - wrong location", ENTITY_NAME, LOG_WARNING);
+        setCargoLock(0);
+        return;
+    }
+
+    if (!setCargoLock(1)) {
+        logEntry("CargoProtection: failed to enable cargo power", ENTITY_NAME, LOG_WARNING);
+        return;
+    }
+
+    logEntry("CargoProtection: cargo power enabled, executing drop", ENTITY_NAME, LOG_INFO);
+
+    // Здесь — передать команду сервоприводу в автопилот обычным способом
+
+    setCargoLock(0);
+    logEntry("CargoProtection: cargo power disabled after drop", ENTITY_NAME, LOG_INFO);
+}
+// === End cargo drop safety protection implementation ===
